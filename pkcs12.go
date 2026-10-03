@@ -547,6 +547,10 @@ func DecodeTrustStore(pfxData []byte, password string) (certs []*x509.Certificat
 	return
 }
 
+// getSafeContents decodes and returns every safe bag in the PFX.  The number
+// of items in the authenticated safe must be between expectedItemsMin and
+// expectedItemsMax; an expectedItemsMax of 0 means that there is no upper
+// limit.
 func getSafeContents(p12Data, password []byte, expectedItemsMin int, expectedItemsMax int) (bags []safeBag, updatedPassword []byte, err error) {
 	pfx := new(pfxPdu)
 	if err := unmarshal(p12Data, pfx); err != nil {
@@ -588,7 +592,7 @@ func getSafeContents(p12Data, password []byte, expectedItemsMin int, expectedIte
 		return nil, nil, err
 	}
 
-	if len(authenticatedSafe) < expectedItemsMin || len(authenticatedSafe) > expectedItemsMax {
+	if len(authenticatedSafe) < expectedItemsMin || (expectedItemsMax != 0 && len(authenticatedSafe) > expectedItemsMax) {
 		if expectedItemsMin == expectedItemsMax {
 			return nil, nil, NotImplementedError(fmt.Sprintf("expected exactly %d items in the authenticated safe, but this file has %d", expectedItemsMin, len(authenticatedSafe)))
 		}
