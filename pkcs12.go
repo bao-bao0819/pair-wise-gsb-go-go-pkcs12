@@ -588,9 +588,12 @@ func getSafeContents(p12Data, password []byte, expectedItemsMin int, expectedIte
 		return nil, nil, err
 	}
 
-	if len(authenticatedSafe) < expectedItemsMin || len(authenticatedSafe) > expectedItemsMax {
+	if len(authenticatedSafe) < expectedItemsMin || (expectedItemsMax > 0 && len(authenticatedSafe) > expectedItemsMax) {
 		if expectedItemsMin == expectedItemsMax {
 			return nil, nil, NotImplementedError(fmt.Sprintf("expected exactly %d items in the authenticated safe, but this file has %d", expectedItemsMin, len(authenticatedSafe)))
+		}
+		if expectedItemsMax <= 0 {
+			return nil, nil, NotImplementedError(fmt.Sprintf("expected at least %d items in the authenticated safe, but this file has %d", expectedItemsMin, len(authenticatedSafe)))
 		}
 		return nil, nil, NotImplementedError(fmt.Sprintf("expected between %d and %d items in the authenticated safe, but this file has %d", expectedItemsMin, expectedItemsMax, len(authenticatedSafe)))
 	}
