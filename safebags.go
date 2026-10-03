@@ -18,6 +18,9 @@ var (
 	oidKeyBag                  = asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 10, 1, 1})
 	oidPKCS8ShroundedKeyBag    = asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 10, 1, 2})
 	oidCertBag                 = asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 10, 1, 3})
+	oidCRLBag                  = asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 10, 1, 4})
+	oidSecretBag               = asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 10, 1, 5})
+	oidSafeContentsBag         = asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 10, 1, 6})
 )
 
 type certBag struct {
@@ -26,14 +29,9 @@ type certBag struct {
 }
 
 func decodePkcs8ShroudedKeyBag(asn1Data, password []byte) (privateKey interface{}, err error) {
-	pkinfo := new(encryptedPrivateKeyInfo)
-	if err = unmarshal(asn1Data, pkinfo); err != nil {
-		return nil, errors.New("pkcs12: error decoding PKCS#8 shrouded key bag: " + err.Error())
-	}
-
-	pkData, err := pbDecrypt(pkinfo, password)
+	pkData, err := decodePkcs8ShroudedKeyBagData(asn1Data, password)
 	if err != nil {
-		return nil, errors.New("pkcs12: error decrypting PKCS#8 shrouded key bag: " + err.Error())
+		return nil, errors.New("pkcs12: error decoding PKCS#8 shrouded key bag: " + err.Error())
 	}
 
 	ret := new(asn1.RawValue)
@@ -48,14 +46,25 @@ func decodePkcs8ShroudedKeyBag(asn1Data, password []byte) (privateKey interface{
 	return privateKey, nil
 }
 
+func decodePkcs8ShroudedKeyBagData(asn1Data, password []byte) (pkData []byte, err error) {
+	pkinfo := new(encryptedPrivateKeyInfo)
+	if err = unmarshal(asn1Data, pkinfo); err != nil {
+		return nil, err
+	}
+	return pbDecrypt(pkinfo, password)
+}
+
 func encodePkcs8ShroudedKeyBag(rand io.Reader, privateKey interface{}, algoID asn1.ObjectIdentifier, password []byte, iterations int, saltLen int) (asn1Data []byte, err error) {
 	var pkData []byte
 	if pkData, err = x509.MarshalPKCS8PrivateKey(privateKey); err != nil {
 		return nil, errors.New("pkcs12: error encoding PKCS#8 private key: " + err.Error())
 	}
+	return encodePkcs8ShroudedKeyBagData(rand, pkData, algoID, password, iterations, saltLen)
+}
 
+func encodePkcs8ShroudedKeyBagData(rand io.Reader, pkData []byte, algoID asn1.ObjectIdentifier, password []byte, iterations int, saltLen int) (asn1Data []byte, err error) {
 	randomSalt := make([]byte, saltLen)
-	if _, err = rand.Read(randomSalt); err != nil {
+	if err = readRandom(rand, randomSalt); err != nil {
 		return nil, errors.New("pkcs12: error reading random salt: " + err.Error())
 	}
 

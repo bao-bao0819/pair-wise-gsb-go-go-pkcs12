@@ -305,7 +305,7 @@ func makePBES2Parameters(rand io.Reader, salt []byte, iterations int) ([]byte, e
 	var err error
 
 	randomIV := make([]byte, 16)
-	if _, err := rand.Read(randomIV); err != nil {
+	if err := readRandom(rand, randomIV); err != nil {
 		return nil, err
 	}
 

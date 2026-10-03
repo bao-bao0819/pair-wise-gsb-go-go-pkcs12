@@ -78,6 +78,17 @@ func (enc Encoder) WithRand(rand io.Reader) *Encoder {
 	return &enc
 }
 
+func readRandom(rand io.Reader, buffer []byte) error {
+	n, err := rand.Read(buffer)
+	if err != nil {
+		return fmt.Errorf("pkcs12: error reading random data: %w", err)
+	}
+	if n != len(buffer) {
+		return errors.New("pkcs12: error reading random data: short read")
+	}
+	return nil
+}
+
 // LegacyRC2 encodes PKCS#12 files using weak algorithms that were
 // traditionally used in PKCS#12 files, including those produced
 // by OpenSSL before 3.0.0, go-pkcs12 before 0.3.0, and Java when
@@ -727,7 +738,7 @@ func (enc *Encoder) Encode(privateKey interface{}, certificate *x509.Certificate
 
 	if enc.macAlgorithm != nil {
 		macSalt := make([]byte, enc.saltLen)
-		if _, err = enc.rand.Read(macSalt); err != nil {
+		if err = readRandom(enc.rand, macSalt); err != nil {
 			return nil, err
 		}
 		pfx.MacData.Mac.Algorithm.Algorithm = enc.macAlgorithm
@@ -902,7 +913,7 @@ func (enc *Encoder) EncodeTrustStoreEntries(entries []TrustStoreEntry, password 
 
 	if enc.macAlgorithm != nil {
 		macSalt := make([]byte, enc.saltLen)
-		if _, err = enc.rand.Read(macSalt); err != nil {
+		if err = readRandom(enc.rand, macSalt); err != nil {
 			return nil, err
 		}
 		pfx.MacData.Mac.Algorithm.Algorithm = enc.macAlgorithm
@@ -964,7 +975,7 @@ func makeSafeContents(rand io.Reader, bags []safeBag, algoID asn1.ObjectIdentifi
 		}
 	} else {
 		randomSalt := make([]byte, saltLen)
-		if _, err = rand.Read(randomSalt); err != nil {
+		if err = readRandom(rand, randomSalt); err != nil {
 			return
 		}
 
