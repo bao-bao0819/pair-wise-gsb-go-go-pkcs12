@@ -301,11 +301,24 @@ type encryptable interface {
 	SetData([]byte)
 }
 
+// readRandom fills b entirely from rand. A short read or any other error is
+// reported, so that a failure of the random source can never result in a
+// partially (and therefore predictably) initialized salt or IV.
+func readRandom(rand io.Reader, b []byte) error {
+	if rand == nil {
+		return errors.New("pkcs12: no random source configured")
+	}
+	if _, err := io.ReadFull(rand, b); err != nil {
+		return errors.New("pkcs12: error reading random data: " + err.Error())
+	}
+	return nil
+}
+
 func makePBES2Parameters(rand io.Reader, salt []byte, iterations int) ([]byte, error) {
 	var err error
 
 	randomIV := make([]byte, 16)
-	if _, err := rand.Read(randomIV); err != nil {
+	if err := readRandom(rand, randomIV); err != nil {
 		return nil, err
 	}
 
