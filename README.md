@@ -26,6 +26,22 @@ on GitHub, the import path is:
 
 Please be sure to use this path when you `go get` and `import` this package.
 
+## Decoding with a policy
+
+The policy-aware entry points (`DecodeChainWithPolicy`, `DecodeWithPolicy`,
+`DecodeTrustStoreWithPolicy`, and `ToPEMWithPolicy`) validate a PFX against a
+`Policy` before deriving any keys.  The policy can restrict the permitted MAC
+and encryption OIDs, cap KDF iteration counts both per derivation and
+cumulatively across the MAC, every encrypted SafeContents and every shrouded
+key, bound salt lengths, and limit the container structure size.  Because all
+visible parameters are checked first, a crafted PFX cannot trigger expensive
+key derivation before it is rejected.
+
+`DefaultPolicy()` provides modern defaults (PBES2/PBKDF2/HMAC-SHA-2, SHA-2
+MACs and PBMAC1 only; bounded iterations, salts and container size).  A nil
+policy is permissive and behaves like the corresponding non-policy entry
+point.
+
 ## Report Issues / Send Patches
 
 Open an issue or PR at https://github.com/SSLMate/go-pkcs12

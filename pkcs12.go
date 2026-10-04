@@ -315,12 +315,23 @@ func unmarshal(in []byte, out interface{}) error {
 // labeled "PRIVATE KEY").  To decode a PKCS#12 file, use [DecodeChain] instead,
 // and use the [encoding/pem] package to convert to PEM if necessary.
 func ToPEM(pfxData []byte, password string) ([]*pem.Block, error) {
+	return toPEM(pfxData, password, nil)
+}
+
+// ToPEMWithPolicy is like [ToPEM] but validates the PFX against policy
+// before deriving any keys.  A nil policy is permissive and behaves like
+// [ToPEM].
+func ToPEMWithPolicy(pfxData []byte, password string, policy *Policy) ([]*pem.Block, error) {
+	return toPEM(pfxData, password, &decodeState{policy: policy})
+}
+
+func toPEM(pfxData []byte, password string, st *decodeState) ([]*pem.Block, error) {
 	encodedPassword, err := bmpStringZeroTerminated(password)
 	if err != nil {
 		return nil, ErrIncorrectPassword
 	}
 
-	bags, encodedPassword, err := getSafeContents(pfxData, encodedPassword, 2, 2)
+	bags, encodedPassword, err := getSafeContentsWithState(pfxData, encodedPassword, 2, 2, st)
 
 	if err != nil {
 		return nil, err
@@ -328,7 +339,7 @@ func ToPEM(pfxData []byte, password string) ([]*pem.Block, error) {
 
 	blocks := make([]*pem.Block, 0, len(bags))
 	for _, bag := range bags {
-		block, err := convertBag(&bag, encodedPassword)
+		block, err := convertBagWithState(&bag, encodedPassword, st)
 		if err != nil {
 			return nil, err
 		}
@@ -380,6 +391,43 @@ func convertBag(bag *safeBag, password []byte) (*pem.Block, error) {
 		}
 	default:
 		return nil, errors.New("pkcs12: don't know how to convert a safe bag of type " + bag.Id.String())
+	}
+	return block, nil
+}
+
+func convertBagWithState(bag *safeBag, password []byte, st *decodeState) (*pem.Block, error) {
+	if st == nil || st.policy == nil || !bag.Id.Equal(oidPKCS8ShroundedKeyBag) {
+		return convertBag(bag, password)
+	}
+
+	block := &pem.Block{
+		Headers: make(map[string]string),
+	}
+
+	for _, attribute := range bag.Attributes {
+		k, v, err := convertAttribute(&attribute)
+		if err != nil {
+			return nil, err
+		}
+		block.Headers[k] = v
+	}
+
+	block.Type = privateKeyType
+	key, err := decodePkcs8ShroudedKeyBagWithState(bag.Value.Bytes, password, st)
+	if err != nil {
+		return nil, err
+	}
+
+	switch key := key.(type) {
+	case *rsa.PrivateKey:
+		block.Bytes = x509.MarshalPKCS1PrivateKey(key)
+	case *ecdsa.PrivateKey:
+		block.Bytes, err = x509.MarshalECPrivateKey(key)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, errors.New("pkcs12: found unknown private key type in PKCS#8 wrapping")
 	}
 	return block, nil
 }
@@ -500,6 +548,91 @@ func DecodeChain(pfxData []byte, password string) (privateKey interface{}, certi
 	return
 }
 
+// DecodeChainWithPolicy is like [DecodeChain] but validates the PFX against
+// policy before deriving any keys.  All MAC/encryption OIDs, KDF iteration
+// counts (per derivation and accumulated across the MAC, every encrypted
+// SafeContents and every shrouded key), salt lengths and container-size
+// limits are checked first; [ErrPolicyRejected] is returned when the policy
+// is violated, [ErrMalformedParameters], [ErrNegativeValue] and
+// [ErrIntegerOverflow] for malformed parameters, and
+// [NotImplementedError] for algorithms the library does not implement.
+// A nil policy is permissive and behaves like [DecodeChain].
+func DecodeChainWithPolicy(pfxData []byte, password string, policy *Policy) (privateKey interface{}, certificate *x509.Certificate, caCerts []*x509.Certificate, err error) {
+	encodedPassword, err := bmpStringZeroTerminated(password)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	st := &decodeState{policy: policy}
+	bags, encodedPassword, err := getSafeContentsWithState(pfxData, encodedPassword, 1, 2, st)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	for _, bag := range bags {
+		switch {
+		case bag.Id.Equal(oidCertBag):
+			certsData, err := decodeCertBag(bag.Value.Bytes)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			certs, err := x509.ParseCertificates(certsData)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			if len(certs) != 1 {
+				err = errors.New("pkcs12: expected exactly one certificate in the certBag")
+				return nil, nil, nil, err
+			}
+			if certificate == nil {
+				certificate = certs[0]
+			} else {
+				caCerts = append(caCerts, certs[0])
+			}
+
+		case bag.Id.Equal(oidKeyBag):
+			if privateKey != nil {
+				err = errors.New("pkcs12: expected exactly one key bag")
+				return nil, nil, nil, err
+			}
+
+			if privateKey, err = x509.ParsePKCS8PrivateKey(bag.Value.Bytes); err != nil {
+				return nil, nil, nil, err
+			}
+		case bag.Id.Equal(oidPKCS8ShroundedKeyBag):
+			if privateKey != nil {
+				err = errors.New("pkcs12: expected exactly one key bag")
+				return nil, nil, nil, err
+			}
+
+			if privateKey, err = decodePkcs8ShroudedKeyBagWithState(bag.Value.Bytes, encodedPassword, st); err != nil {
+				return nil, nil, nil, err
+			}
+		}
+	}
+
+	if certificate == nil {
+		return nil, nil, nil, errors.New("pkcs12: certificate missing")
+	}
+	if privateKey == nil {
+		return nil, nil, nil, errors.New("pkcs12: private key missing")
+	}
+
+	return
+}
+
+// DecodeWithPolicy is like [Decode] but validates the PFX against policy
+// before deriving any keys.  A nil policy is permissive and behaves like
+// [Decode].
+func DecodeWithPolicy(pfxData []byte, password string, policy *Policy) (privateKey interface{}, certificate *x509.Certificate, err error) {
+	var caCerts []*x509.Certificate
+	privateKey, certificate, caCerts, err = DecodeChainWithPolicy(pfxData, password, policy)
+	if len(caCerts) != 0 {
+		err = errors.New("pkcs12: expected exactly two safe bags in the PFX PDU")
+	}
+	return
+}
+
 // DecodeTrustStore extracts the certificates from pfxData, which must be a DER-encoded
 // PKCS#12 file containing exclusively certificates with attribute 2.16.840.1.113894.746875.1.1,
 // which is used by Java to designate a trust anchor.
@@ -547,7 +680,61 @@ func DecodeTrustStore(pfxData []byte, password string) (certs []*x509.Certificat
 	return
 }
 
+// DecodeTrustStoreWithPolicy is like [DecodeTrustStore] but validates the
+// PFX against policy before deriving any keys.  A nil policy is permissive
+// and behaves like [DecodeTrustStore].
+func DecodeTrustStoreWithPolicy(pfxData []byte, password string, policy *Policy) (certs []*x509.Certificate, err error) {
+	encodedPassword, err := bmpStringZeroTerminated(password)
+	if err != nil {
+		return nil, err
+	}
+
+	st := &decodeState{policy: policy}
+	bags, encodedPassword, err := getSafeContentsWithState(pfxData, encodedPassword, 1, 1, st)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, bag := range bags {
+		switch {
+		case bag.Id.Equal(oidCertBag):
+			if !bag.hasAttribute(oidJavaTrustStore) {
+				return nil, errors.New("pkcs12: trust store contains a certificate that is not marked as trusted")
+			}
+			certsData, err := decodeCertBag(bag.Value.Bytes)
+			if err != nil {
+				return nil, err
+			}
+			parsedCerts, err := x509.ParseCertificates(certsData)
+			if err != nil {
+				return nil, err
+			}
+
+			if len(parsedCerts) != 1 {
+				err = errors.New("pkcs12: expected exactly one certificate in the certBag")
+				return nil, err
+			}
+
+			certs = append(certs, parsedCerts[0])
+
+		default:
+			return nil, errors.New("pkcs12: expected only certificate bags")
+		}
+	}
+
+	return
+}
+
 func getSafeContents(p12Data, password []byte, expectedItemsMin int, expectedItemsMax int) (bags []safeBag, updatedPassword []byte, err error) {
+	return getSafeContentsWithState(p12Data, password, expectedItemsMin, expectedItemsMax, nil)
+}
+
+// getSafeContentsWithState is the policy-aware core.  When st is nil it
+// behaves exactly like the legacy entry point.  Otherwise every visible
+// parameter is validated against st.policy (and charged against st's budget)
+// before the corresponding KDF is invoked; the budget is never reset between
+// the MAC, encrypted SafeContents and (later) shrouded keys.
+func getSafeContentsWithState(p12Data, password []byte, expectedItemsMin int, expectedItemsMax int, st *decodeState) (bags []safeBag, updatedPassword []byte, err error) {
 	pfx := new(pfxPdu)
 	if err := unmarshal(p12Data, pfx); err != nil {
 		return nil, nil, errors.New("pkcs12: error reading P12 data: " + err.Error())
@@ -566,33 +753,66 @@ func getSafeContents(p12Data, password []byte, expectedItemsMin int, expectedIte
 		return nil, nil, err
 	}
 
-	if len(pfx.MacData.Mac.Algorithm.Algorithm) == 0 {
-		if !(len(password) == 2 && password[0] == 0 && password[1] == 0) {
-			return nil, nil, errors.New("pkcs12: no MAC in data")
+	verifyMacAndGetSafe := func() ([]contentInfo, []byte, error) {
+		if len(pfx.MacData.Mac.Algorithm.Algorithm) == 0 {
+			if !(len(password) == 2 && password[0] == 0 && password[1] == 0) {
+				return nil, nil, errors.New("pkcs12: no MAC in data")
+			}
+		} else if verr := verifyMac(&pfx.MacData, pfx.AuthSafe.Content.Bytes, password); verr != nil {
+			if verr == ErrIncorrectPassword && len(password) == 2 && password[0] == 0 && password[1] == 0 {
+				// some implementations use an empty byte array
+				// for the empty string password try one more
+				// time with empty-empty password
+				password = nil
+				verr = verifyMac(&pfx.MacData, pfx.AuthSafe.Content.Bytes, password)
+			}
+			if verr != nil {
+				return nil, nil, verr
+			}
 		}
-	} else if err := verifyMac(&pfx.MacData, pfx.AuthSafe.Content.Bytes, password); err != nil {
-		if err == ErrIncorrectPassword && len(password) == 2 && password[0] == 0 && password[1] == 0 {
-			// some implementations use an empty byte array
-			// for the empty string password try one more
-			// time with empty-empty password
-			password = nil
-			err = verifyMac(&pfx.MacData, pfx.AuthSafe.Content.Bytes, password)
+
+		var authenticatedSafe []contentInfo
+		if uerr := unmarshal(pfx.AuthSafe.Content.Bytes, &authenticatedSafe); uerr != nil {
+			return nil, nil, uerr
 		}
-		if err != nil {
-			return nil, nil, err
+
+		if len(authenticatedSafe) < expectedItemsMin || len(authenticatedSafe) > expectedItemsMax {
+			if expectedItemsMin == expectedItemsMax {
+				return nil, nil, NotImplementedError(fmt.Sprintf("expected exactly %d items in the authenticated safe, but this file has %d", expectedItemsMin, len(authenticatedSafe)))
+			}
+			return nil, nil, NotImplementedError(fmt.Sprintf("expected between %d and %d items in the authenticated safe, but this file has %d", expectedItemsMin, expectedItemsMax, len(authenticatedSafe)))
 		}
+		return authenticatedSafe, password, nil
 	}
 
 	var authenticatedSafe []contentInfo
-	if err := unmarshal(pfx.AuthSafe.Content.Bytes, &authenticatedSafe); err != nil {
-		return nil, nil, err
-	}
-
-	if len(authenticatedSafe) < expectedItemsMin || len(authenticatedSafe) > expectedItemsMax {
-		if expectedItemsMin == expectedItemsMax {
-			return nil, nil, NotImplementedError(fmt.Sprintf("expected exactly %d items in the authenticated safe, but this file has %d", expectedItemsMin, len(authenticatedSafe)))
+	if st != nil && st.policy != nil {
+		// Policy path: validate everything that can be determined without
+		// deriving keys before any KDF runs.  Passing this preflight says
+		// nothing about whether the MAC is correct; the integrity check
+		// below still runs exactly as before.
+		if uerr := unmarshal(pfx.AuthSafe.Content.Bytes, &authenticatedSafe); uerr != nil {
+			return nil, nil, uerr
 		}
-		return nil, nil, NotImplementedError(fmt.Sprintf("expected between %d and %d items in the authenticated safe, but this file has %d", expectedItemsMin, expectedItemsMax, len(authenticatedSafe)))
+		if len(authenticatedSafe) < expectedItemsMin || len(authenticatedSafe) > expectedItemsMax {
+			if expectedItemsMin == expectedItemsMax {
+				return nil, nil, NotImplementedError(fmt.Sprintf("expected exactly %d items in the authenticated safe, but this file has %d", expectedItemsMin, len(authenticatedSafe)))
+			}
+			return nil, nil, NotImplementedError(fmt.Sprintf("expected between %d and %d items in the authenticated safe, but this file has %d", expectedItemsMin, expectedItemsMax, len(authenticatedSafe)))
+		}
+		authenticatedSafe, err = st.preflightPFX(p12Data, pfx, authenticatedSafe)
+		if err != nil {
+			return nil, nil, err
+		}
+		authenticatedSafe, password, err = verifyMacAndGetSafe()
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		authenticatedSafe, password, err = verifyMacAndGetSafe()
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	for _, ci := range authenticatedSafe {
@@ -621,6 +841,9 @@ func getSafeContents(p12Data, password []byte, expectedItemsMin int, expectedIte
 		var safeContents []safeBag
 		if err := unmarshal(data, &safeContents); err != nil {
 			return nil, nil, err
+		}
+		if st != nil && st.policy != nil && st.policy.MaxSafeBags > 0 && len(bags)+len(safeContents) > st.policy.MaxSafeBags {
+			return nil, nil, fmt.Errorf("%w: safe contents contain %d bags in total, maximum is %d", ErrPolicyRejected, len(bags)+len(safeContents), st.policy.MaxSafeBags)
 		}
 		bags = append(bags, safeContents...)
 	}

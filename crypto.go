@@ -250,6 +250,7 @@ func pbes2CipherFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher
 		return nil, nil, NotImplementedError("pbes2 algorithm " + params.EncryptionScheme.Algorithm.String() + " is not supported")
 	}
 
+	observeKDF("pbes2-pbkdf2", kdfParams.Iterations)
 	key := pbkdf2.Key(password, kdfParams.Salt.Bytes, kdfParams.Iterations, keyLen, prf)
 	iv := params.EncryptionScheme.Parameters.Bytes
 

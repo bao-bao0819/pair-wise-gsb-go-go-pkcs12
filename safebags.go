@@ -48,6 +48,37 @@ func decodePkcs8ShroudedKeyBag(asn1Data, password []byte) (privateKey interface{
 	return privateKey, nil
 }
 
+// decodePkcs8ShroudedKeyBagWithState validates the shrouding algorithm and
+// charges its KDF to the shared budget before decrypting.
+func decodePkcs8ShroudedKeyBagWithState(asn1Data, password []byte, st *decodeState) (privateKey interface{}, err error) {
+	pkinfo := new(encryptedPrivateKeyInfo)
+	if err = unmarshal(asn1Data, pkinfo); err != nil {
+		return nil, errors.New("pkcs12: error decoding PKCS#8 shrouded key bag: " + err.Error())
+	}
+
+	if st != nil && st.policy != nil {
+		if err = st.checkEncryptionAlgorithm(pkinfo.AlgorithmIdentifier, "shrouded key bag"); err != nil {
+			return nil, err
+		}
+	}
+
+	pkData, err := pbDecrypt(pkinfo, password)
+	if err != nil {
+		return nil, errors.New("pkcs12: error decrypting PKCS#8 shrouded key bag: " + err.Error())
+	}
+
+	ret := new(asn1.RawValue)
+	if err = unmarshal(pkData, ret); err != nil {
+		return nil, errors.New("pkcs12: error unmarshaling decrypted private key: " + err.Error())
+	}
+
+	if privateKey, err = x509.ParsePKCS8PrivateKey(pkData); err != nil {
+		return nil, errors.New("pkcs12: error parsing PKCS#8 private key: " + err.Error())
+	}
+
+	return privateKey, nil
+}
+
 func encodePkcs8ShroudedKeyBag(rand io.Reader, privateKey interface{}, algoID asn1.ObjectIdentifier, password []byte, iterations int, saltLen int) (asn1Data []byte, err error) {
 	var pkData []byte
 	if pkData, err = x509.MarshalPKCS8PrivateKey(privateKey); err != nil {

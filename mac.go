@@ -12,7 +12,6 @@ import (
 	"crypto/sha512"
 	"crypto/x509/pkix"
 	"encoding/asn1"
-	"errors"
 	"fmt"
 	"hash"
 
@@ -120,24 +119,15 @@ func doPBMAC1(algorithm pkix.AlgorithmIdentifier, message, password []byte) ([]b
 		return nil, NotImplementedError("PBMAC1 MAC algorithm " + params.MacAlg.Algorithm.String() + " is not supported")
 	}
 
-	// KeyLength is mandatory in RFC 9579
-	if kdfParams.KeyLength <= 0 {
-		return nil, errors.New("pkcs12: PBMAC1 requires explicit KeyLength parameter in PBKDF2 parameters")
-	}
-	// RFC 9579 RECOMMENDS rejecting key lengths less than 20; this is necessary to prevent possible authentication bypass (e.g. OpenSSL's CVE-2026-34181)
-	if kdfParams.KeyLength < 20 {
-		return nil, fmt.Errorf("pkcs12: PBMAC1 key length %d is too short to be secure (minimum 20 octets)", kdfParams.KeyLength)
-	}
-	// RFC 9879 RECOMMENDS that the key length match the HMAC output size, which
-	// is at most 64 octets (SHA-512).  Reject anything larger so that a huge
-	// KeyLength can't cause a huge PBKDF2 allocation (matching OpenSSL's EVP_MAX_MD_SIZE cap)
-	const maxKeyLength = 64
-	if kdfParams.KeyLength > maxKeyLength {
-		return nil, fmt.Errorf("pkcs12: PBMAC1 key length %d is too large (maximum %d octets)", kdfParams.KeyLength, maxKeyLength)
+	// KeyLength is mandatory in RFC 9579; the bounds guard against
+	// authentication bypasses and oversized PBKDF2 allocations.
+	if err := checkPBMAC1KeyLength(int64(kdfParams.KeyLength)); err != nil {
+		return nil, err
 	}
 	keyLen := kdfParams.KeyLength
 
 	// Derive key using PBKDF2
+	observeKDF("pbmac1-pbkdf2", kdfParams.Iterations)
 	key := pbkdf2.Key(password, kdfParams.Salt.Bytes, kdfParams.Iterations, keyLen, prf)
 
 	// Compute HMAC

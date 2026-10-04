@@ -46,6 +46,7 @@ func fillWithRepeats(pattern []byte, v int) []byte {
 
 func pbkdf(hash func([]byte) []byte, u, v int, salt, password []byte, r int, ID byte, size int) (key []byte) {
 	// implementation of https://tools.ietf.org/html/rfc7292#appendix-B.2 , RFC text verbatim in comments
+	observeKDF("pbe-pbkdf", r)
 
 	//    Let H be a hash function built around a compression function f:
 
