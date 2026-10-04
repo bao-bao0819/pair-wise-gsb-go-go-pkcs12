@@ -13,6 +13,10 @@ var (
 	// ErrIncorrectPassword is returned when an incorrect password is detected.
 	// Usually, P12/PFX data is signed to be able to verify the password.
 	ErrIncorrectPassword = errors.New("pkcs12: decryption password incorrect")
+
+	// ErrPasswordMissing is returned when a [PasswordFunc] declines to provide
+	// a password for an encryption layer, leaving that layer locked.
+	ErrPasswordMissing = errors.New("pkcs12: no password provided for encrypted data")
 )
 
 // NotImplementedError indicates that the input is not currently supported.
