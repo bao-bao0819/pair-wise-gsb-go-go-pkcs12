@@ -15,8 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"hash"
-
-	"golang.org/x/crypto/pbkdf2"
 )
 
 type macData struct {
@@ -138,7 +136,7 @@ func doPBMAC1(algorithm pkix.AlgorithmIdentifier, message, password []byte) ([]b
 	keyLen := kdfParams.KeyLength
 
 	// Derive key using PBKDF2
-	key := pbkdf2.Key(password, kdfParams.Salt.Bytes, kdfParams.Iterations, keyLen, prf)
+	key := kdfPBKDF2Hook(password, kdfParams.Salt.Bytes, kdfParams.Iterations, keyLen, prf)
 
 	// Compute HMAC
 	mac := hmac.New(hFn, key)
@@ -165,13 +163,13 @@ func doMac(macData *macData, message, password []byte) ([]byte, error) {
 	switch {
 	case macData.Mac.Algorithm.Algorithm.Equal(oidSHA1):
 		hFn = sha1.New
-		key = pbkdf(sha1Sum, 20, 64, macData.MacSalt, password, macData.Iterations, 3, 20)
+		key = kdfLegacyHook(sha1Sum, 20, 64, macData.MacSalt, password, macData.Iterations, 3, 20)
 	case macData.Mac.Algorithm.Algorithm.Equal(oidSHA256):
 		hFn = sha256.New
-		key = pbkdf(sha256Sum, 32, 64, macData.MacSalt, password, macData.Iterations, 3, 32)
+		key = kdfLegacyHook(sha256Sum, 32, 64, macData.MacSalt, password, macData.Iterations, 3, 32)
 	case macData.Mac.Algorithm.Algorithm.Equal(oidSHA512):
 		hFn = sha512.New
-		key = pbkdf(sha512Sum, 64, 128, macData.MacSalt, password, macData.Iterations, 3, 64)
+		key = kdfLegacyHook(sha512Sum, 64, 128, macData.MacSalt, password, macData.Iterations, 3, 64)
 	default:
 		return nil, NotImplementedError("MAC digest algorithm not supported: " + macData.Mac.Algorithm.Algorithm.String())
 	}

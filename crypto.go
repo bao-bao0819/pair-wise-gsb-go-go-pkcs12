@@ -24,6 +24,18 @@ import (
 	"software.sslmate.com/src/go-pkcs12/internal/rc2"
 )
 
+// kdfLegacyHook and kdfPBKDF2Hook are the single KDF chokepoints.  Production
+// code always performs real derivation, but tests may temporarily replace the
+// hooks to observe (and count) KDF invocations without paying their cost.
+var (
+	kdfLegacyHook = func(hashFn func([]byte) []byte, u, v int, salt, password []byte, iterations int, id byte, size int) []byte {
+		return pbkdf(hashFn, u, v, salt, password, iterations, id, size)
+	}
+	kdfPBKDF2Hook = func(password, salt []byte, iter, keyLen int, h func() hash.Hash) []byte {
+		return pbkdf2.Key(password, salt, iter, keyLen, h)
+	}
+)
+
 var (
 	oidPBEWithSHAAnd3KeyTripleDESCBC = asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 1, 3})
 	oidPBEWithSHAAnd128BitRC2CBC     = asn1.ObjectIdentifier([]int{1, 2, 840, 113549, 1, 12, 1, 5})
@@ -55,11 +67,11 @@ func (shaWithTripleDESCBC) create(key []byte) (cipher.Block, error) {
 }
 
 func (shaWithTripleDESCBC) deriveKey(salt, password []byte, iterations int) []byte {
-	return pbkdf(sha1Sum, 20, 64, salt, password, iterations, 1, 24)
+	return kdfLegacyHook(sha1Sum, 20, 64, salt, password, iterations, 1, 24)
 }
 
 func (shaWithTripleDESCBC) deriveIV(salt, password []byte, iterations int) []byte {
-	return pbkdf(sha1Sum, 20, 64, salt, password, iterations, 2, 8)
+	return kdfLegacyHook(sha1Sum, 20, 64, salt, password, iterations, 2, 8)
 }
 
 type shaWith128BitRC2CBC struct{}
@@ -69,11 +81,11 @@ func (shaWith128BitRC2CBC) create(key []byte) (cipher.Block, error) {
 }
 
 func (shaWith128BitRC2CBC) deriveKey(salt, password []byte, iterations int) []byte {
-	return pbkdf(sha1Sum, 20, 64, salt, password, iterations, 1, 16)
+	return kdfLegacyHook(sha1Sum, 20, 64, salt, password, iterations, 1, 16)
 }
 
 func (shaWith128BitRC2CBC) deriveIV(salt, password []byte, iterations int) []byte {
-	return pbkdf(sha1Sum, 20, 64, salt, password, iterations, 2, 8)
+	return kdfLegacyHook(sha1Sum, 20, 64, salt, password, iterations, 2, 8)
 }
 
 type shaWith40BitRC2CBC struct{}
@@ -83,11 +95,11 @@ func (shaWith40BitRC2CBC) create(key []byte) (cipher.Block, error) {
 }
 
 func (shaWith40BitRC2CBC) deriveKey(salt, password []byte, iterations int) []byte {
-	return pbkdf(sha1Sum, 20, 64, salt, password, iterations, 1, 5)
+	return kdfLegacyHook(sha1Sum, 20, 64, salt, password, iterations, 1, 5)
 }
 
 func (shaWith40BitRC2CBC) deriveIV(salt, password []byte, iterations int) []byte {
-	return pbkdf(sha1Sum, 20, 64, salt, password, iterations, 2, 8)
+	return kdfLegacyHook(sha1Sum, 20, 64, salt, password, iterations, 2, 8)
 }
 
 type pbeParams struct {
@@ -95,7 +107,7 @@ type pbeParams struct {
 	Iterations int
 }
 
-func pbeCipherFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher.Block, []byte, error) {
+func pbeCipherForWithConfig(algorithm pkix.AlgorithmIdentifier, password []byte, cfg *decodeConfig) (cipher.Block, []byte, error) {
 	var cipherType pbeCipher
 
 	switch {
@@ -115,13 +127,19 @@ func pbeCipherFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher.B
 			return nil, nil, err
 		}
 		utf8Password := []byte(originalPassword)
-		return pbes2CipherFor(algorithm, utf8Password)
+		return pbes2CipherForWithConfig(algorithm, utf8Password, cfg)
 	default:
 		return nil, nil, NotImplementedError("pbe algorithm " + algorithm.Algorithm.String() + " is not supported")
 	}
 
 	var params pbeParams
 	if err := unmarshal(algorithm.Parameters.FullBytes, &params); err != nil {
+		return nil, nil, err
+	}
+
+	// Legacy PBE derives a key and an IV separately: charge both invocations
+	// against the cumulative budget before doing any hashing.
+	if err := cfg.charge(params.Iterations, pbeLegacyWork(int64(params.Iterations)), "PBE"); err != nil {
 		return nil, nil, err
 	}
 
@@ -136,8 +154,12 @@ func pbeCipherFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher.B
 	return block, iv, nil
 }
 
-func pbDecrypterFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher.BlockMode, int, error) {
-	block, iv, err := pbeCipherFor(algorithm, password)
+func pbeCipherFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher.Block, []byte, error) {
+	return pbeCipherForWithConfig(algorithm, password, nil)
+}
+
+func pbDecrypterForWithConfig(algorithm pkix.AlgorithmIdentifier, password []byte, cfg *decodeConfig) (cipher.BlockMode, int, error) {
+	block, iv, err := pbeCipherForWithConfig(algorithm, password, cfg)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -145,8 +167,12 @@ func pbDecrypterFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher
 	return cipher.NewCBCDecrypter(block, iv), block.BlockSize(), nil
 }
 
-func pbDecrypt(info decryptable, password []byte) (decrypted []byte, err error) {
-	cbc, blockSize, err := pbDecrypterFor(info.Algorithm(), password)
+func pbDecrypterFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher.BlockMode, int, error) {
+	return pbDecrypterForWithConfig(algorithm, password, nil)
+}
+
+func pbDecryptWithConfig(info decryptable, password []byte, cfg *decodeConfig) (decrypted []byte, err error) {
+	cbc, blockSize, err := pbDecrypterForWithConfig(info.Algorithm(), password, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -179,6 +205,10 @@ func pbDecrypt(info decryptable, password []byte) (decrypted []byte, err error) 
 	return
 }
 
+func pbDecrypt(info decryptable, password []byte) (decrypted []byte, err error) {
+	return pbDecryptWithConfig(info, password, nil)
+}
+
 //	PBES2-params ::= SEQUENCE {
 //		keyDerivationFunc AlgorithmIdentifier {{PBES2-KDFs}},
 //		encryptionScheme AlgorithmIdentifier {{PBES2-Encs}}
@@ -205,7 +235,7 @@ type pbkdf2Params struct {
 	Prf        pkix.AlgorithmIdentifier `asn1:"optional"`
 }
 
-func pbes2CipherFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher.Block, []byte, error) {
+func pbes2CipherForWithConfig(algorithm pkix.AlgorithmIdentifier, password []byte, cfg *decodeConfig) (cipher.Block, []byte, error) {
 	var params pbes2Params
 	if err := unmarshal(algorithm.Parameters.FullBytes, &params); err != nil {
 		return nil, nil, err
@@ -250,7 +280,11 @@ func pbes2CipherFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher
 		return nil, nil, NotImplementedError("pbes2 algorithm " + params.EncryptionScheme.Algorithm.String() + " is not supported")
 	}
 
-	key := pbkdf2.Key(password, kdfParams.Salt.Bytes, kdfParams.Iterations, keyLen, prf)
+	if err := cfg.charge(kdfParams.Iterations, int64(kdfParams.Iterations), "PBES2"); err != nil {
+		return nil, nil, err
+	}
+
+	key := kdfPBKDF2Hook(password, kdfParams.Salt.Bytes, kdfParams.Iterations, keyLen, prf)
 	iv := params.EncryptionScheme.Parameters.Bytes
 
 	block, err := aes.NewCipher(key)
@@ -269,8 +303,8 @@ type decryptable interface {
 	Data() []byte
 }
 
-func pbEncrypterFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher.BlockMode, int, error) {
-	block, iv, err := pbeCipherFor(algorithm, password)
+func pbEncrypterForWithConfig(algorithm pkix.AlgorithmIdentifier, password []byte, cfg *decodeConfig) (cipher.BlockMode, int, error) {
+	block, iv, err := pbeCipherForWithConfig(algorithm, password, cfg)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -278,8 +312,12 @@ func pbEncrypterFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher
 	return cipher.NewCBCEncrypter(block, iv), block.BlockSize(), nil
 }
 
-func pbEncrypt(info encryptable, decrypted []byte, password []byte) error {
-	cbc, blockSize, err := pbEncrypterFor(info.Algorithm(), password)
+func pbEncrypterFor(algorithm pkix.AlgorithmIdentifier, password []byte) (cipher.BlockMode, int, error) {
+	return pbEncrypterForWithConfig(algorithm, password, nil)
+}
+
+func pbEncryptWithConfig(info encryptable, decrypted []byte, password []byte, cfg *decodeConfig) error {
+	cbc, blockSize, err := pbEncrypterForWithConfig(info.Algorithm(), password, cfg)
 	if err != nil {
 		return err
 	}
@@ -293,6 +331,10 @@ func pbEncrypt(info encryptable, decrypted []byte, password []byte) error {
 	info.SetData(encrypted)
 
 	return nil
+}
+
+func pbEncrypt(info encryptable, decrypted []byte, password []byte) error {
+	return pbEncryptWithConfig(info, decrypted, password, nil)
 }
 
 // encryptable abstracts a object that contains ciphertext.

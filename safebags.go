@@ -25,13 +25,13 @@ type certBag struct {
 	Data []byte `asn1:"tag:0,explicit"`
 }
 
-func decodePkcs8ShroudedKeyBag(asn1Data, password []byte) (privateKey interface{}, err error) {
+func decodePkcs8ShroudedKeyBagWithConfig(asn1Data, password []byte, cfg *decodeConfig) (privateKey interface{}, err error) {
 	pkinfo := new(encryptedPrivateKeyInfo)
 	if err = unmarshal(asn1Data, pkinfo); err != nil {
 		return nil, errors.New("pkcs12: error decoding PKCS#8 shrouded key bag: " + err.Error())
 	}
 
-	pkData, err := pbDecrypt(pkinfo, password)
+	pkData, err := pbDecryptWithConfig(pkinfo, password, cfg)
 	if err != nil {
 		return nil, errors.New("pkcs12: error decrypting PKCS#8 shrouded key bag: " + err.Error())
 	}
@@ -46,6 +46,10 @@ func decodePkcs8ShroudedKeyBag(asn1Data, password []byte) (privateKey interface{
 	}
 
 	return privateKey, nil
+}
+
+func decodePkcs8ShroudedKeyBag(asn1Data, password []byte) (privateKey interface{}, err error) {
+	return decodePkcs8ShroudedKeyBagWithConfig(asn1Data, password, nil)
 }
 
 func encodePkcs8ShroudedKeyBag(rand io.Reader, privateKey interface{}, algoID asn1.ObjectIdentifier, password []byte, iterations int, saltLen int) (asn1Data []byte, err error) {
